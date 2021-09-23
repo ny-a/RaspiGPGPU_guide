@@ -2,6 +2,7 @@
 import concurrent.futures
 import sys
 import io
+import math
 import numpy as np
 from PIL import Image, ImageFilter
 
@@ -37,7 +38,7 @@ def piadd(asm):
     THR_NM    = 4
     COMPLETED = 0 #セマフォ用
 
-    R = 30
+    R = 32
 
     ldi(null,mask(IN_ADDR),set_flags=True)  # r2にuniformを格納
     mov(r2,uniform,cond='zs')
@@ -63,24 +64,20 @@ def piadd(asm):
     for i in range(R):
         #ra
         mov(tmu0_s,r0)
-        nop(sig='load tmu0')
+        iadd(r0, r0, r5,sig='load tmu0')
         fsub(null, r4, r1, set_flags=True)
         mov(ra[i], 0.0, cond='ns')
-        mov(ra[i], r3,  cond='nc')
-        iadd(r0, r0, r5)
-
+        mov(ra[i], r3,  cond='nc').mov(tmu0_s,r0)
         #rb
-        mov(tmu1_s,r0)
-        nop(sig='load tmu1')
+        iadd(r0,r0,r5,sig='load tmu0')
         fsub(null, r4, r1, set_flags=True)
         mov(rb[i], 0.0, cond='ns')
         mov(rb[i], r3,  cond='nc')
-        iadd(r0,r0,r5)
 
     ldi(r3,R*2*16*4)
 
-    mutex_acquire()
     rotate(broadcast,r2,-OUT_ADDR)
+    mutex_acquire()
     setup_vpm_write(mode='32bit horizontal',Y=0,X=0)
 
     for i in range(R):
@@ -130,11 +127,16 @@ with Driver() as drv:
     DISPLAY_W, DISPLAY_H = hdmi.getResolution()
 
     # 画像サイズ
-    W=320
-    H=360
+    W=800
+    H=800
 
-    ALIGNED_W = ((W + 15) // 16) * 16
-    ALIGNED_H = ((H + 31) // 32) * 32
+    ALIGNMENT = 32
+
+    ALIGNED_W = math.ceil(W / ALIGNMENT) * ALIGNMENT
+    ALIGNED_H = math.ceil(H / ALIGNMENT) * ALIGNMENT
+    W = ALIGNED_W
+
+    print(W, H)
 
     WINDOW_W = DISPLAY_W // 3
     WINDOW_H = min(int((WINDOW_W / W) * H), DISPLAY_H)
@@ -152,11 +154,12 @@ with Driver() as drv:
 
     n_threads=12
     SIMD=16
-    R=30
+    R=32
 
-    th_H    = int(H/n_threads) #1スレッドの担当行
-    th_ele  = th_H*W #1スレッドの担当要素
-    io_iter = int(th_ele/(R*2*SIMD)) #何回転送するか
+    th_H    = math.floor(H/n_threads) #1スレッドの担当行
+    th_ele  = math.floor(H*W/n_threads) #1スレッドの担当要素
+    io_iter = math.floor(th_ele/(R*2*SIMD)) #何回転送するか
+    th_ele = io_iter * R * 2 * SIMD
 
     print(th_H, th_ele, io_iter)
 
@@ -166,8 +169,8 @@ with Driver() as drv:
 
     uniforms=drv.alloc((n_threads,5),'uint32')
     for th in range(n_threads):
-        uniforms[th,0]=IN.addresses()[int(th_H*th),0]
-        uniforms[th,1]=OUT.addresses()[int(th_H*th),0]
+      uniforms[th,0]=IN.address + (th_ele * 4 * th)
+      uniforms[th,1]=OUT.address + (th_ele * 4 * th)
     uniforms[:,2]=int(io_iter)
     uniforms[:,3]=np.arange(1,(n_threads+1))
     uniforms[:,4]=n_threads
