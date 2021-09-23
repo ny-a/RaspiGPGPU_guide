@@ -1,4 +1,5 @@
 #coding:utf-8
+import concurrent.futures
 import sys
 import io
 import numpy as np
@@ -36,7 +37,8 @@ def piadd(asm):
     THR_NM    = 4
     COMPLETED = 0 #セマフォ用
 
-    
+    R = 30
+
     ldi(null,mask(IN_ADDR),set_flags=True)  # r2にuniformを格納
     mov(r2,uniform,cond='zs')
     ldi(null,mask(OUT_ADDR),set_flags=True)
@@ -48,7 +50,7 @@ def piadd(asm):
     ldi(null,mask(THR_NM),set_flags=True)
     mov(r2,uniform,cond='zs')
 
-    imul24(r3,element_number,4) 
+    imul24(r3,element_number,4)
     rotate(broadcast,r2,-IN_ADDR)
     iadd(r0,r5,r3) # r0:IN_ADDR
 
@@ -58,7 +60,7 @@ def piadd(asm):
     ldi(r3, 255.0)  # White
 
     ldi(broadcast,16*4)
-    for i in range(30):
+    for i in range(R):
         #ra
         mov(tmu0_s,r0)
         nop(sig='load tmu0')
@@ -75,17 +77,17 @@ def piadd(asm):
         mov(rb[i], r3,  cond='nc')
         iadd(r0,r0,r5)
 
-    ldi(r3,60*16*4)
+    ldi(r3,R*2*16*4)
 
     mutex_acquire()
     rotate(broadcast,r2,-OUT_ADDR)
     setup_vpm_write(mode='32bit horizontal',Y=0,X=0)
 
-    for i in range(30):
+    for i in range(R):
         mov(vpm,ra[i])
         mov(vpm,rb[i])
 
-    setup_dma_store(mode='32bit horizontal',Y=0,nrows=60)
+    setup_dma_store(mode='32bit horizontal',Y=0,nrows=R*2)
     start_dma_store(r5)
     wait_dma_store()
 
@@ -100,7 +102,7 @@ def piadd(asm):
 
 
 
-#====semaphore=====    
+#====semaphore=====
     sema_up(COMPLETED)
     rotate(broadcast,r2,-THR_ID)
     iadd(null,r5,-1,set_flags=True)
@@ -115,27 +117,34 @@ def piadd(asm):
     sema_down(COMPLETED)    # すべてのスレッドが終了するまで待つ
     nop()
     iadd(r0, r0, -1)
-    
+
     interrupt()
-    
+
     L.skip_fin
-    
+
     exit(interrupt=False)
 
-    
+
 with Driver() as drv:
-    
+
     DISPLAY_W, DISPLAY_H = hdmi.getResolution()
 
     # 画像サイズ
-    H=360
     W=320
-    
+    H=360
+
+    ALIGNED_W = ((W + 15) // 16) * 16
+    ALIGNED_H = ((H + 31) // 32) * 32
+
+    WINDOW_W = DISPLAY_W // 3
+    WINDOW_H = min(int((WINDOW_W / W) * H), DISPLAY_H)
+
     # cameraセットアップ
-    cam = camera.setCamera(320, 368)
+    cam = camera.setCamera(ALIGNED_W, ALIGNED_H)
     cam.framerate = 30
     overlay_dstimg = camera.PiCameraOverlay(cam, 3)
-    cam.start_preview(fullscreen=False, window=(0, 0, W*2, H*2))
+    overlay_dstimg2 = camera.PiCameraOverlay(cam, 4)
+    cam.start_preview(fullscreen=False, window=(0, 0, WINDOW_W, WINDOW_H))
 
     # 画面のクリア
     back_img = Image.new('RGBA', (DISPLAY_W, DISPLAY_H), 0)
@@ -143,11 +152,11 @@ with Driver() as drv:
 
     n_threads=12
     SIMD=16
-    R=60
+    R=30
 
     th_H    = int(H/n_threads) #1スレッドの担当行
     th_ele  = th_H*W #1スレッドの担当要素
-    io_iter = int(th_ele/(R*SIMD)) #何回転送するか
+    io_iter = int(th_ele/(R*2*SIMD)) #何回転送するか
 
     print(th_H, th_ele, io_iter)
 
@@ -165,35 +174,52 @@ with Driver() as drv:
 
     code=drv.program(piadd)
 
+    def capture_thread():
+      input_img_RGB = camera.capture2PIL(cam, stream, (ALIGNED_W, ALIGNED_H))
+      input_img = input_img_RGB.convert('L')
+      pil_img = input_img.resize((W, H))
+
+      IN[:] = np.asarray(pil_img)[:]
+
+    def gpu_thread():
+      drv.execute(
+          n_threads= n_threads,
+          program  = code,
+          uniforms = uniforms
+      )
+      # OUT[:] = IN[:]
+
+    def fps_thread():
+      print(f'{fps.update():.3f} FPS')
+
+    def image_out_thread():
+      out_img = Image.fromarray(OUT.astype(np.uint8))
+      out_img = out_img.convert('RGB')
+      overlay_dstimg.OnOverlayUpdated(out_img, format='rgb', fullscreen=False, window=(WINDOW_W, 0, WINDOW_W, WINDOW_H))
+
+    def info_out_thread():
+      draw_img = Image.new('L', (W, H), 0)
+      hdmi.addText(draw_img, *(10, 32 * 0), "Raspberry Pi VC4")
+      hdmi.addText(draw_img, *(10, 32 * 2), f'Binarization')
+      hdmi.addText(draw_img, *(10, 32 * 3), f'{H}x{W}')
+      hdmi.addText(draw_img, *(10, 32 * 5), f'{fps.get():.3f} FPS')
+
+      draw_img = draw_img.convert('RGB')
+      overlay_dstimg2.OnOverlayUpdated(draw_img, format='rgb', fullscreen=False, window=(WINDOW_W*2, 0, WINDOW_W, WINDOW_H))
+
+
     try:
       fps = FPS()
       stream = io.BytesIO()
-      while True:
-          input_img_RGB = camera.capture2PIL(cam, stream, (320, 368))
-          input_img = input_img_RGB.convert('L')
-          pil_img = input_img.resize((W, H))
-
-          IN[:] = np.asarray(pil_img)[:]
-          CC = IN
-
-          drv.execute(
-              n_threads= n_threads,
-              program  = code,
-              uniforms = uniforms
-          )
-
-          out_img = Image.fromarray(OUT.astype(np.uint8))
-          draw_img = Image.new('L', (W*2, H), 0)
-          draw_img.paste(out_img, (0, 0))
-          hdmi.addText(draw_img, *(W+10, 32 * 0), "Raspberry Pi VC4")
-          hdmi.addText(draw_img, *(W+10, 32 * 2), f'Binarization')
-          hdmi.addText(draw_img, *(W+10, 32 * 3), f'{H}x{W}')
-          hdmi.addText(draw_img, *(W+10, 32 * 5), f'{fps.update():.3f} FPS')
-
-          draw_img = draw_img.convert('RGB')
-          overlay_dstimg.OnOverlayUpdated(draw_img, format='rgb', fullscreen=False, window=(W*2, 0, W*4, H*2))
-
-          print(f'{fps.get():.3f} FPS')
+      with concurrent.futures.ThreadPoolExecutor() as executor:
+        while True:
+          concurrent.futures.wait([
+            executor.submit(fps_thread),
+            executor.submit(capture_thread),
+            executor.submit(gpu_thread),
+            executor.submit(image_out_thread),
+            executor.submit(info_out_thread),
+          ])
 
     except KeyboardInterrupt:
       # Ctrl-C を捕まえた！
