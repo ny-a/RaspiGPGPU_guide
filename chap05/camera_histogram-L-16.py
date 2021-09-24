@@ -211,17 +211,14 @@ with Driver() as drv:
       draw_img = Image.new('RGB', (W, H), (0, 0, 0))
       draw = ImageDraw.Draw(draw_img)
       histogram_value = [0] * HISTOGRAM_ELEMS
-      in_data = IN.astype(np.int32)
       out_data = OUT.astype(np.int32)
-
-      histogram_np = [0] * HISTOGRAM_ELEMS
-
-      for i in range(HISTOGRAM_ELEMS):
-        histogram_np[i] = np.count_nonzero(in_data < ((i+1) * 16))
 
       for th in range(n_threads):
         for i in range(SIMD):
           histogram_value[i] += out_data[th, i]
+
+      for i in range(15, 0, -1):
+        histogram_value[i] -= histogram_value[i-1]
 
       for i in range(HISTOGRAM_ELEMS):
         draw.rectangle((graph_width * i, H - (histogram_value[i] / W), graph_width * (i+1), H), fill=(255, 255, 255))
