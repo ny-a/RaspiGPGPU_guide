@@ -38,7 +38,7 @@ def histogram(asm):
     THR_NM    = 4
     COMPLETED = 0 #セマフォ用
 
-    R = 30
+    R = 32
 
     ldi(null,mask(IN_ADDR),set_flags=True)  # r2にuniformを格納
     mov(r2,uniform,cond='zs')
@@ -137,7 +137,7 @@ with Driver() as drv:
 
     # 画像サイズ
     W=320
-    H=360
+    H=384
 
     ALIGNMENT = 32
 
@@ -164,7 +164,7 @@ with Driver() as drv:
 
     n_threads=12
     SIMD=16
-    R=30
+    R=32
     HISTOGRAM_ELEMS=16
 
     th_H    = int(H/n_threads) #1スレッドの担当行
